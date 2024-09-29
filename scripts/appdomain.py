@@ -53,10 +53,10 @@ def main():
     rospy.init_node("zepper")
 
     # 创建 ROS 发布者，消息类型为VisionInfo
-    publisher = rospy.Publisher('vision_info', VisionInfo, queue_size=10)
+    publisher = rospy.Publisher('vision_info', VisionInfo, queue_size=50)
 
     # 设置发布频率为10Hz
-    rate = rospy.Rate(10)
+    rate = rospy.Rate(30)
 
     # 实例化ZED相机对象
     camera = sl.Camera()
@@ -66,13 +66,13 @@ def main():
 
     # 设置分辨率为720p，帧率为30fps、不进行图像翻转
     init_params.camera_resolution = sl.RESOLUTION.HD720
-    init_params.camera_fps = 15
+    init_params.camera_fps = 60
 
     # 设置深度模式为超高精度模式，深度单位为毫米，深度探测范围0.15-10m
     init_params.depth_mode = sl.DEPTH_MODE.ULTRA
     init_params.coordinate_units = sl.UNIT.MILLIMETER
     init_params.depth_minimum_distance = 150
-    init_params.depth_maximum_distance = 10000
+    init_params.depth_maximum_distance = 5000
 
     # 打开相机
     camera_launch_status = camera.open(init_params)
@@ -112,8 +112,12 @@ def main():
                                            cv2.COLOR_RGB2GRAY)
 
             # 对左、右图像进行目标检测
-            left_detection = Detection(onnx_model, left_image_cv2, (720, 1280), 0.4, 0.35, 0)
-            right_detection = Detection(onnx_model, right_image_cv2, (720, 1280), 0.4, 0.35, 0)
+            left_detection = Detection(onnx_model, left_image_cv2, (720, 1280), 0.3, 0.35, 0)
+            right_detection = Detection(onnx_model, right_image_cv2, (720, 1280), 0.3, 0.35, 0)
+            # k-means聚类准备
+            pixel_values = right_image_cv2.reshape((-1, 3))
+            pixel_values =  np.float32(pixel_values)
+
 
             # 获取左、右图像检测框的中心坐标集合
             left_bbox_xywh = left_detection.get_bbox_xywh()
@@ -127,6 +131,7 @@ def main():
                 cv2.imshow("Left", left_image_cv2)
                 cv2.imshow("Right", right_image_cv2)
                 cv2.imshow("Depth", depth_image_cv2)
+                cv2.imshow("k-means", right_image_cv2)# 若无检测框，显示黑色图像
 
                 # 发布ROS消息，全部置0
                 info = VisionInfo()
@@ -155,6 +160,26 @@ def main():
                 right_box_cy = right_bbox_xywh[0][1]
                 right_box_width = right_bbox_xywh[0][2]
                 right_box_height = right_bbox_xywh[0][3]
+
+                # k-means参数设置
+                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 5, 0.3)
+                k = 7 # 聚类数(簇)
+                
+                # 进行k-means聚类
+                _, labels, centers = cv2.kmeans(pixel_values, k, None, criteria, 15, cv2.KMEANS_PP_CENTERS)
+                centers = np.uint8(centers) # 转换为整数
+                segmented_image = centers[labels.flatten()] # 重构图像, 用聚类中心替换每个像素
+                segmented_image = segmented_image.reshape(right_image_cv2.shape)
+                for box in right_bbox_xywh:
+                    x,y,w,h = box
+                    roi = segmented_image[y:y+h, x:x+w]
+                    
+                    roi_labels = labels.reshape(right_image_cv2.shape[:2])[y:y+h, x:x+w] # 获取roi区域的标签
+                    paper_cluster = (roi_labels == 0)
+                    paper_roi = np.zeros_like(roi)
+                    paper_roi[paper_cluster] = roi[paper_cluster] # 获取辣椒区域
+
+
 
                 # 获取左图bounding box的深度值
                 err, left_depth_value = point_cloud_matrix_sl.get_value(left_box_cx, left_box_cy)
@@ -186,11 +211,17 @@ def main():
                     draw_label(right_image_cv2, 'dist: ' + str(int(distance)), int(right_box_cx - right_box_width / 2),
                                int(right_box_cy - right_box_height / 2), int(right_box_cx + right_box_width / 2),
                                int(right_box_cy + right_box_height / 2))
+                    draw_label(segmented_image, 'dist: ' + str(int(distance)), int(right_box_cx - right_box_width / 2),
+                               int(right_box_cy - right_box_height / 2), int(right_box_cx + right_box_width / 2),
+                               int(right_box_cy + right_box_height / 2))
 
                     # 显示图像
+                    paper_roi_resized = cv2.resize(paper_roi, None, fx=3, fy=3, interpolation=cv2.INTER_LINEAR)
                     cv2.imshow("Left", left_image_cv2)
                     cv2.imshow("Right", right_image_cv2)
                     cv2.imshow("Depth", depth_image_cv2)
+                    cv2.imshow("k-means", paper_roi_resized)
+                    # cv2.imshow("k-means", segmented_image)
 
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
